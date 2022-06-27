@@ -2,7 +2,7 @@ use crate::{data::Data, Error, BOT_ID};
 use gpt3_rs::Request;
 use log::{debug, info};
 use poise::{BoxFuture, Event, FrameworkContext};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use tokio::time::Instant;
 
 pub fn listener<'a>(
@@ -12,88 +12,127 @@ pub fn listener<'a>(
     data: &'a Arc<Data>,
 ) -> BoxFuture<'a, Result<(), Error>> {
     Box::pin(async move {
-        if let Event::Message { new_message } = event {
-            let mut last_message = data.last_message.write().await;
-            let config = data.config.read().await;
-            let chance = config.chance;
-            let context_len = config.max_context_len;
-            let minimum_score = config.minimum_score;
-            let cooldown = config.cooldown;
+        match event {
+            Event::Message { new_message } => {
+                // return if not guild message
+                let Some(guild_id) = new_message.guild_id else {
+                    return Ok(())
+                };
+                // return if not a registered guild
+                let Some(guild_meta_lock) = data.get_guild(guild_id).await else {
+                    return Ok(())
+                };
 
-            if new_message.author.id == BOT_ID {
-                return Ok(());
-            }
-            if last_message.elapsed().as_secs() < cooldown as u64 {
-                return Ok(());
-            }
+                // guild metadata guard
+                let mut guild_meta = guild_meta_lock.write().await;
 
-            if fastrand::u8(0..=100) <= chance {
-                debug!("message chance occured");
-                let mut phrases = data.phrases.write().await;
-                let phrases_content = phrases
-                    .iter()
-                    .map(|phrase| phrase.content.as_str())
-                    .collect::<Vec<_>>();
+                let config = &guild_meta.config;
+                let chance = config.chance;
+                let context_len = config.max_context_len;
+                let minimum_score = config.minimum_score;
+                let cooldown = config.cooldown;
+                let last_response = guild_meta.last_response;
+                let phrases = &guild_meta.phrases;
 
-                let client = &data.client;
+                if new_message.author.id == BOT_ID {
+                    return Ok(());
+                }
 
-                // fetches recent messages
-                let messages = new_message
-                    .channel_id
-                    .messages(&context.http, |m| m.limit(10))
-                    .await?;
+                // return if on cooldown
+                match last_response {
+                    Some(last_response) if last_response.elapsed().as_secs() < cooldown as u64 => {
+                        return Ok(())
+                    }
+                    _ => {}
+                }
 
-                // merges recent messages into one
-                let merged = messages
-                    .iter()
-                    .rev()
-                    .map(|messages| &*messages.content)
-                    .intersperse(" ")
-                    .collect::<String>();
+                if fastrand::u8(0..=100) <= chance {
+                    debug!("message chance occured");
 
-                // finds start index of message within bounds of max context length
-                let mut acc = 0;
-                let start = merged
-                    .split(' ')
-                    .rev()
-                    .take_while(|word| {
-                        acc += word.len() + 1;
-                        acc < context_len
-                    })
-                    .fold(0, |start, word| start + word.len() + 1);
-                let (_, message_text) = merged.split_at(merged.len() - (start - 1));
+                    // collect phrases for request
+                    let phrases_content = phrases.iter().cloned().collect::<Vec<_>>();
 
-                debug!("query:\n{}", message_text);
+                    let client = &data.client;
 
-                // build search query
-                let response = gpt3_rs::api::searches::Builder::default()
-                    .model(gpt3_rs::Model::Babbage)
-                    .documents(phrases_content)
-                    .query(message_text)
-                    .build()?
-                    .request(client)
-                    .await?;
+                    // fetches recent messages
+                    let messages = new_message
+                        .channel_id
+                        .messages(&context.http, |m| m.limit(10))
+                        .await?;
 
-                debug!("response:\n{:#?}", response);
+                    // merges recent messages into one
+                    let merged = messages
+                        .iter()
+                        .rev()
+                        .map(|messages| &*messages.content)
+                        .intersperse(" ")
+                        .collect::<String>();
 
-                // gets highest score and check if it's above the threshold
-                let index = response
-                    .data
-                    .into_iter()
-                    .reduce(|acc, data| if acc.score < data.score { data } else { acc })
-                    .filter(|data| data.score >= minimum_score as f64)
-                    .map(|data| data.document);
+                    // finds start index of message within bounds of max context length
+                    let mut acc = 0;
+                    let start = merged
+                        .split(' ')
+                        .rev()
+                        .take_while(|word| {
+                            acc += word.len() + 1;
+                            acc < context_len
+                        })
+                        .fold(0, |start, word| start + word.len() + 1);
+                    let (_, message_text) = merged.split_at(merged.len() - (start - 1));
 
-                if let Some(catchphrase) = index.and_then(|i| phrases.get_mut(i)) {
-                    if catchphrase.last_phrase.elapsed() > Duration::from_secs(cooldown as u64) {
-                        *last_message = Instant::now();
-                        catchphrase.last_phrase = Instant::now();
-                        let content = &catchphrase.content;
-                        info!("found catchphrase: {}", content);
-                        new_message.channel_id.say(&context.http, content).await?;
+                    debug!("query:\n{}", message_text);
+
+                    // build search request
+                    let response = gpt3_rs::api::searches::Builder::default()
+                        .model(gpt3_rs::Model::Babbage)
+                        .documents(phrases_content)
+                        .query(message_text)
+                        .build()?
+                        .request(client)
+                        .await?;
+
+                    debug!("response:\n{:#?}", response);
+
+                    // gets highest score and check if it's above the threshold
+                    let index = response
+                        .data
+                        .into_iter()
+                        .reduce(|acc, data| if acc.score < data.score { data } else { acc })
+                        .filter(|data| data.score >= minimum_score as f64)
+                        .map(|data| data.document);
+
+                    if let Some(catchphrase) = index.and_then(|i| phrases.iter().nth(i)).cloned() {
+                        let phrase_cooldown = guild_meta.cooldown.get(&catchphrase);
+
+                        // if phrase has cooldown
+                        if phrase_cooldown.is_some_and(|last_phrase| {
+                            last_phrase.elapsed().as_secs() > cooldown as u64
+                        }) || phrase_cooldown.is_none()
+                        {
+                            // reset cooldowns
+                            guild_meta.last_response = Some(Instant::now());
+                            guild_meta
+                                .cooldown
+                                .insert(catchphrase.clone(), Instant::now());
+
+                            info!("found catchphrase: {}", catchphrase);
+
+                            // send phrase
+                            new_message
+                                .channel_id
+                                .say(&context.http, catchphrase)
+                                .await?;
+                        }
                     }
                 }
             }
+            // adds newly joined guilds to the guild map
+            Event::GuildCreate { guild, ..}=> {
+                let guild_id = guild.id;
+                let mut guild_meta_map = data.guild_meta_map.write().await;
+                guild_meta_map.entry(guild_id).or_default();
+            },
+            _ => {}
         }
         Ok(())
     })
