@@ -8,21 +8,22 @@ mod data;
 mod listener;
 
 use data::Data;
-use log::info;
+use log::{debug, info, warn};
 use poise::{
     serenity_prelude::{self as serenity, Color, Colour, GuildId, RwLock, UserId},
     PrefixFrameworkOptions,
 };
 use std::sync::Arc;
+use tokio::sync::OnceCell;
 
 use crate::data::GuildMeta;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Arc<Data>, Error>;
 
+static BOT_ID: OnceCell<UserId> = OnceCell::const_new();
 const EMBED_COLOR: Color = Colour(0x2F3136);
-const BOT_ID: UserId = UserId(973661305502330881);
-const DATA_PATH: &str = "servers";
+const DATA_PATH: &str = "guilds";
 
 #[tokio::main]
 async fn main() {
@@ -31,9 +32,9 @@ async fn main() {
 
     // init logger
     env_logger::builder()
-        .filter(Some("catchphrase::listener"), log::LevelFilter::Debug)
+        .filter(Some("catchphrase"), log::LevelFilter::Debug)
         .init();
-        
+
     // start framework
     poise::Framework::build()
         .token(bot_token)
@@ -72,38 +73,46 @@ async fn main() {
             info!("starting bot");
 
             Box::pin(async move {
+                BOT_ID
+                    .get_or_init(async || _ctx.cache.current_user_id())
+                    .await;
                 let data = Arc::new(Data::new(gpt_token));
 
                 let mut guild_meta_map = data.guild_meta_map.write().await;
 
-                // walk dir and add config files to data
-                if let Ok(mut server_files) = tokio::fs::read_dir(DATA_PATH).await {
-                    while let Ok(Some(server_file)) = server_files.next_entry().await {
-                        // cursed "try" block ( || {} )()
-                        if let Some((id, guild_meta)) = (async || {
-                            // file name is guild id
-                            let id = server_file
-                                .file_name()
-                                .to_string_lossy()
-                                .parse::<u64>()
-                                .ok()?;
-                            // file content
-                            let bytes = tokio::fs::read(server_file.path()).await.ok()?;
-                            // deserialzed metadata
-                            let guild_meta = ron::de::from_bytes::<GuildMeta>(&bytes).ok()?;
+                // init joined guilds with default values
+                for guild in _ready.guilds.iter() {
+                    guild_meta_map.entry(guild.id).or_default();
+                    debug!("initialized: {}", guild.id)
+                }
 
-                            Some((id, guild_meta))
+                // walk dir and add config files to data
+                if let Ok(mut guild_files) = tokio::fs::read_dir(DATA_PATH).await {
+                    while let Ok(Some(guild_file)) = guild_files.next_entry().await {
+                        // cursed "try" block ( || {} )()
+                        match (async || -> Result<_, Error> {
+                            let file_name = guild_file.file_name();
+                            let file_name = file_name.to_string_lossy();
+
+                            // get id from file name
+                            let id = file_name[..file_name.len() - 4].parse::<u64>()?;
+                            // file content
+                            let bytes = tokio::fs::read(guild_file.path()).await?;
+                            // deserialzed metadata
+                            let guild_meta = ron::de::from_bytes::<GuildMeta>(&bytes)?;
+
+                            Ok((id, guild_meta))
                         })()
                         .await
                         {
-                            guild_meta_map.insert(GuildId(id), Arc::new(RwLock::new(guild_meta)));
+                            Ok((id, guild_meta)) => {
+                                debug!("loaded guild: {}", id);
+                                guild_meta_map
+                                    .insert(GuildId(id), Arc::new(RwLock::new(guild_meta)));
+                            }
+                            Err(err) => warn!("error loading guild: {}", err),
                         }
                     }
-                }
-
-                // init guilds not saved as files
-                for guild in _ready.guilds.iter() {
-                    guild_meta_map.entry(guild.id).or_default();
                 }
 
                 drop(guild_meta_map);
