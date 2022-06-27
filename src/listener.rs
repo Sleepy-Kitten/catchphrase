@@ -34,7 +34,7 @@ pub fn listener<'a>(
                 let last_response = guild_meta.last_response;
                 let phrases = &guild_meta.phrases;
 
-                if new_message.author.id == BOT_ID {
+                if new_message.author.id == *BOT_ID.get().unwrap() {
                     return Ok(());
                 }
 
