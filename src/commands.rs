@@ -10,6 +10,7 @@ use crate::{Context, Error, DATA_PATH, EMBED_COLOR};
 pub async fn add_catchphrase(
     ctx: Context<'_>,
     #[description = "Added catchphrase"] catchphrase: String,
+    #[description = "Optional keywords to associate with that catchphrase"] keywords: Vec<String>,
 ) -> Result<(), Error> {
     let data = ctx.data();
 
@@ -19,16 +20,30 @@ pub async fn add_catchphrase(
         .expect("guild not found");
     let mut guild_meta = guild_meta_lock.write().await;
 
-    guild_meta.phrases.insert(catchphrase.clone());
-
     ctx.send(|r| {
         r.embed(|e| {
             e.color(EMBED_COLOR);
             e.title("Added catchphrase");
-            e.field("catchphrase: ", catchphrase, true)
+            e.field("catchphrase: ", &catchphrase, true);
+            if !keywords.is_empty() {
+                e.field(
+                    "keywords: ",
+                    keywords
+                        .iter()
+                        .map(|keyword| &**keyword)
+                        .collect::<String>(),
+                    false,
+                );
+            }
+            e
         })
     })
     .await?;
+
+    guild_meta.phrases.insert(
+        catchphrase.clone(),
+        keywords.into_iter().collect::<HashSet<_>>(),
+    );
 
     Ok(())
 }
@@ -47,11 +62,20 @@ pub async fn list_catchphrases(ctx: Context<'_>) -> Result<(), Error> {
     let phrases = &guild_meta.phrases;
 
     if !phrases.is_empty() {
-        let phrases = phrases
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, string)| (index, string, false));
+        let phrases = phrases.iter().map(|(phrase, keywords)| {
+            (
+                phrase,
+                format!(
+                    "keywords: {}",
+                    keywords
+                        .iter()
+                        .map(|keyword| &**keyword)
+                        .intersperse(", ")
+                        .collect::<String>()
+                ),
+                false,
+            )
+        });
 
         ctx.send(|r| {
             r.embed(|e| {
@@ -89,7 +113,7 @@ pub async fn remove_catchphrase(
         .expect("guild not found");
     let mut guild_meta = guild_meta_lock.write().await;
 
-    let phrase_existed = guild_meta.phrases.remove(&phrase);
+    let phrase_existed = guild_meta.phrases.remove(&phrase).is_some();
 
     if phrase_existed {
         ctx.send(|r| {
@@ -248,8 +272,7 @@ pub async fn dump_configs(ctx: Context<'_>) -> Result<(), Error> {
     }
 
     if let Some(errors) = errors {
-        ctx.say(format!("failed to dump {} guilds", errors))
-            .await?;
+        ctx.say(format!("failed to dump {} guilds", errors)).await?;
     } else {
         ctx.say("dumped configs succesfully").await?;
     }
@@ -273,7 +296,7 @@ pub async fn load_phrases(
         let mut guild_meta = guild_meta_lock.write().await;
 
         for phrase in phrases_loaded.drain() {
-            guild_meta.phrases.insert(phrase);
+            guild_meta.phrases.insert(phrase, Default::default());
         }
         ctx.say("loaded phrases").await?;
     } else {

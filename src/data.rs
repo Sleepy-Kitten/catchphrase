@@ -1,4 +1,7 @@
-use std::{collections::{HashMap, HashSet}, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use gpt3_rs::Client;
 use poise::serenity_prelude::{ChannelId, GuildId, RwLock};
@@ -22,7 +25,7 @@ pub struct GuildMeta {
     pub last_response: Option<Instant>,
     #[serde(skip)]
     pub cooldown: HashMap<String, Instant>,
-    pub phrases: HashSet<String>,
+    pub phrases: HashMap<String, HashSet<String>>,
     pub channels: HashSet<ChannelId>,
     pub config: Config,
 }
@@ -34,6 +37,11 @@ pub struct Config {
     pub chance: u8,
     pub cooldown: u16,
     pub model: gpt3_rs::Model,
+}
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+pub struct Phrase {
+    pub phrase: String,
+    pub keywords: HashSet<String>,
 }
 impl Default for Config {
     fn default() -> Self {

@@ -33,7 +33,11 @@ pub fn listener<'a>(
                 let cooldown = config.cooldown;
                 let last_response = guild_meta.last_response;
                 let phrases = &guild_meta.phrases;
+                let channels = &guild_meta.channels;
 
+                if !channels.contains(&new_message.channel_id) {
+                    return Ok(());
+                }
                 if new_message.author.id == *BOT_ID.get().unwrap() {
                     return Ok(());
                 }
@@ -48,17 +52,47 @@ pub fn listener<'a>(
 
                 if fastrand::u8(0..=100) <= chance {
                     debug!("message chance occured");
-
-                    // collect phrases for request
-                    let phrases_content = phrases.iter().cloned().collect::<Vec<_>>();
-
-                    let client = &data.client;
-
+                    
                     // fetches recent messages
                     let messages = new_message
                         .channel_id
                         .messages(&context.http, |m| m.limit(10))
                         .await?;
+
+                    // return if any of the messages are from itself
+                    if messages.iter().any(|message| message.is_own(&context.cache)) {
+                        return Ok(())
+                    }
+
+                    // collect phrases for request
+                    let (phrases_content, keyword_content): (Vec<_>, Vec<_>) = phrases
+                        .iter()
+                        .map(|(phrase, keywords)| {
+                            (
+                                phrase.clone(),
+                                keywords
+                                    .iter()
+                                    .map(|keyword| &**keyword)
+                                    .intersperse(", ")
+                                    .collect::<String>(),
+                            )
+                        })
+                        .unzip();
+
+                    let documents = phrases_content
+                        .iter()
+                        .zip(keyword_content.iter())
+                        .map(|(phrase, keywords)| {
+                            if keywords.is_empty() {
+                                phrase
+                            } else {
+                                keywords
+                            }
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+
+                    let client = &data.client;
 
                     // merges recent messages into one
                     let merged = messages
@@ -81,11 +115,12 @@ pub fn listener<'a>(
                     let (_, message_text) = merged.split_at(merged.len() - (start - 1));
 
                     debug!("query:\n{}", message_text);
+                    debug!("documents:\n{:#?}", documents);
 
                     // build search request
                     let response = gpt3_rs::api::searches::Builder::default()
                         .model(gpt3_rs::Model::Babbage)
-                        .documents(phrases_content)
+                        .documents(documents)
                         .query(message_text)
                         .build()?
                         .request(client)
@@ -101,7 +136,7 @@ pub fn listener<'a>(
                         .filter(|data| data.score >= minimum_score as f64)
                         .map(|data| data.document);
 
-                    if let Some(catchphrase) = index.and_then(|i| phrases.iter().nth(i)).cloned() {
+                    if let Some(catchphrase) = index.and_then(|i| phrases_content.get(i)).cloned() {
                         let phrase_cooldown = guild_meta.cooldown.get(&catchphrase);
 
                         // if phrase has cooldown
@@ -127,11 +162,11 @@ pub fn listener<'a>(
                 }
             }
             // adds newly joined guilds to the guild map
-            Event::GuildCreate { guild, ..}=> {
+            Event::GuildCreate { guild, .. } => {
                 let guild_id = guild.id;
                 let mut guild_meta_map = data.guild_meta_map.write().await;
                 guild_meta_map.entry(guild_id).or_default();
-            },
+            }
             _ => {}
         }
         Ok(())
