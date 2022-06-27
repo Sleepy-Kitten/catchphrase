@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use log::{debug, warn};
 use ron::ser::PrettyConfig;
 
 use crate::{Context, Error, DATA_PATH, EMBED_COLOR};
@@ -223,22 +224,35 @@ pub async fn remove_channel(ctx: Context<'_>) -> Result<(), Error> {
 pub async fn dump_configs(ctx: Context<'_>) -> Result<(), Error> {
     let data = ctx.data();
 
-    let guild_id = ctx.guild_id().unwrap();
-    let guild_meta_lock = data.get_guild(guild_id).await.expect("guild not found");
-    let guild_meta = guild_meta_lock.read().await;
-    let text = ron::ser::to_string_pretty(&*guild_meta, Default::default())?;
-    let guild_id = guild_id.0;
-    
-    match tokio::fs::write(format!("{DATA_PATH}/{guild_id}.ron"), text).await {
-        Ok(_) => {
-            ctx.say("dumped configs to file").await?;
-        }
-        Err(err) => {
-            ctx.say("error while dumping configs to file: ").await?;
-            ctx.say(format!("```\n{err}\n```")).await?;
+    let guild_meta_map = data.guild_meta_map.read().await;
+    ctx.say("attempting to dump configs to file").await?;
+
+    let mut errors: Option<u32> = None;
+
+    for (guild_id, guild_meta_lock) in guild_meta_map.iter() {
+        let guild_id = guild_id.0;
+        let guild_meta = guild_meta_lock.read().await;
+        let text = ron::ser::to_string_pretty(&*guild_meta, Default::default())?;
+        drop(guild_meta);
+
+        match tokio::fs::write(format!("{DATA_PATH}/{guild_id}.ron"), text).await {
+            Ok(_) => {
+                debug!("dumped guild: {}", guild_id);
+            }
+            Err(err) => {
+                warn!("error while dumping guild: {}", guild_id);
+                warn!("error: `{}`", err);
+                errors = Some(errors.unwrap_or_default() + 1);
+            }
         }
     }
 
+    if let Some(errors) = errors {
+        ctx.say(format!("failed to dump {} guilds", errors))
+            .await?;
+    } else {
+        ctx.say("dumped configs succesfully").await?;
+    }
     Ok(())
 }
 
